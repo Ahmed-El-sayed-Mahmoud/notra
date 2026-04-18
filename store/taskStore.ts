@@ -1,27 +1,38 @@
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Task, TaskFilter, AISuggestion } from '@/types';
+import { Task, TaskFilter } from '@/types';
+import {
+  fetchTasks,
+  createTask,
+  updateTask,
+  deleteTask,
+  toggleComplete as apiToggleComplete,
+} from '@/lib/tasksApi';
+import type { CreateTaskDto, UpdateTaskDto } from '@/types/taskDtos';
 
 interface TaskState {
   tasks: Task[];
   filter: TaskFilter;
-  addTask: (task: Omit<Task, 'id' | 'createdAt' | 'aiSuggestions'>) => void;
-  updateTask: (id: string, updates: Partial<Task>) => void;
-  deleteTask: (id: string) => void;
-  toggleComplete: (id: string) => void;
+  isLoading: boolean;
+  error: string | null;
+
+  hydrate: () => Promise<void>;
+  addTask: (dto: CreateTaskDto) => Promise<void>;
+  updateTask: (id: string, dto: UpdateTaskDto) => Promise<void>;
+  deleteTask: (id: string) => Promise<void>;
+  toggleComplete: (id: string) => Promise<void>;
   setFilter: (filter: TaskFilter) => void;
-  addAISuggestion: (taskId: string, suggestion: Omit<AISuggestion, 'id' | 'createdAt'>) => void;
+  setLoading: (isLoading: boolean) => void;
+  setError: (error: string | null) => void;
 }
 
 const isToday = (dateStr: string | null): boolean => {
   if (!dateStr) return false;
-  const date = new Date(dateStr);
-  const today = new Date();
+  const d = new Date(dateStr);
+  const now = new Date();
   return (
-    date.getFullYear() === today.getFullYear() &&
-    date.getMonth() === today.getMonth() &&
-    date.getDate() === today.getDate()
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
   );
 };
 
@@ -30,81 +41,90 @@ const isOverdue = (dateStr: string | null, completed: boolean): boolean => {
   return new Date(dateStr) < new Date(new Date().setHours(0, 0, 0, 0));
 };
 
-export const useTaskStore = create<TaskState>()(
-  persist(
-    (set, get) => ({
-      tasks: [],
-      filter: 'all',
+export const useTaskStore = create<TaskState>()((set, get) => ({
+  tasks: [],
+  filter: 'all',
+  isLoading: false,
+  error: null,
 
-      addTask: (taskData) => {
-        const task: Task = {
-          ...taskData,
-          id: Date.now().toString(),
-          createdAt: new Date().toISOString(),
-          aiSuggestions: [],
-        };
-        set((state) => ({ tasks: [...state.tasks, task] }));
-      },
-
-      updateTask: (id, updates) => {
-        set((state) => ({
-          tasks: state.tasks.map((t) => (t.id === id ? { ...t, ...updates } : t)),
-        }));
-      },
-
-      deleteTask: (id) => {
-        set((state) => ({ tasks: state.tasks.filter((t) => t.id !== id) }));
-      },
-
-      toggleComplete: (id) => {
-        set((state) => ({
-          tasks: state.tasks.map((t) =>
-            t.id === id ? { ...t, completed: !t.completed } : t
-          ),
-        }));
-      },
-
-      setFilter: (filter) => set({ filter }),
-
-      addAISuggestion: (taskId, suggestion) => {
-        const newSuggestion: AISuggestion = {
-          ...suggestion,
-          id: Date.now().toString(),
-          createdAt: new Date().toISOString(),
-        };
-        set((state) => ({
-          tasks: state.tasks.map((t) =>
-            t.id === taskId
-              ? { ...t, aiSuggestions: [...t.aiSuggestions, newSuggestion] }
-              : t
-          ),
-        }));
-      },
-    }),
-    {
-      name: 'notra-tasks',
-      storage: createJSONStorage(() => AsyncStorage),
+  hydrate: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      const tasks = await fetchTasks();
+      set({ tasks, isLoading: false });
+    } catch (e) {
+      set({ isLoading: false, error: (e as Error).message });
     }
-  )
-);
+  },
+
+  addTask: async (dto) => {
+    set({ error: null });
+    try {
+      const task = await createTask(dto);
+      set((s) => ({ tasks: [task, ...s.tasks] }));
+    } catch (e) {
+      set({ error: (e as Error).message });
+    }
+  },
+
+  updateTask: async (id, dto) => {
+    const previous = get().tasks;
+    set((s) => ({
+      tasks: s.tasks.map((t) => (t.id === id ? { ...t, ...dto } : t)),
+      error: null,
+    }));
+    try {
+      const updated = await updateTask(id, dto);
+      set((s) => ({ tasks: s.tasks.map((t) => (t.id === id ? updated : t)) }));
+    } catch (e) {
+      set({ tasks: previous, error: (e as Error).message });
+    }
+  },
+
+  deleteTask: async (id) => {
+    const previous = get().tasks;
+    set((s) => ({ tasks: s.tasks.filter((t) => t.id !== id), error: null }));
+    try {
+      await deleteTask(id);
+    } catch (e) {
+      set({ tasks: previous, error: (e as Error).message });
+    }
+  },
+
+  toggleComplete: async (id) => {
+    const previous = get().tasks;
+    const task = previous.find((t) => t.id === id);
+    if (!task) return;
+
+    set((s) => ({
+      tasks: s.tasks.map((t) =>
+        t.id === id ? { ...t, completed: !t.completed } : t
+      ),
+      error: null,
+    }));
+
+    try {
+      const updated = await apiToggleComplete(id, { completed: !task.completed });
+      set((s) => ({ tasks: s.tasks.map((t) => (t.id === id ? updated : t)) }));
+    } catch (e) {
+      set({ tasks: previous, error: (e as Error).message });
+    }
+  },
+
+  setFilter: (filter) => set({ filter }),
+  setLoading: (isLoading) => set({ isLoading }),
+  setError: (error) => set({ error }),
+}));
 
 export const getFilteredTasks = (tasks: Task[], filter: TaskFilter): Task[] => {
   switch (filter) {
-    case 'active':
-      return tasks.filter((t) => !t.completed);
-    case 'completed':
-      return tasks.filter((t) => t.completed);
-    case 'today':
-      return tasks.filter((t) => isToday(t.dueDate));
-    case 'overdue':
-      return tasks.filter((t) => isOverdue(t.dueDate, t.completed));
-    default:
-      return tasks;
+    case 'active':    return tasks.filter((t) => !t.completed);
+    case 'completed': return tasks.filter((t) => t.completed);
+    case 'today':     return tasks.filter((t) => isToday(t.dueDate));
+    case 'overdue':   return tasks.filter((t) => isOverdue(t.dueDate, t.completed));
+    default:          return tasks;
   }
 };
 
-export const getTodayTasks = (tasks: Task[]): Task[] =>
-  tasks.filter((t) => isToday(t.dueDate));
-
-export const getOverdueTasks = (tasks: Task[]): Task[] =>
-  tasks.filter((t) => isOverdue(t.dueDate, t.completed));
+export const getTodayTasks  = (tasks: Task[]): Task[] => tasks.filter((t) => isToday(t.dueDate));
+export const getOverdueTasks = (tasks: Task[]): Task[] => tasks.filter((t) => isOverdue(t.dueDate, t.completed));

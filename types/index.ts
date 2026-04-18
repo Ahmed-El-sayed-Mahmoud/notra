@@ -1,5 +1,7 @@
 export type Priority = 'low' | 'medium' | 'high';
 
+export * from './taskDtos';
+
 export type TaskFilter = 'all' | 'active' | 'completed' | 'today' | 'overdue';
 
 export interface AIMessage {
